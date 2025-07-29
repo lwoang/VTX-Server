@@ -1,0 +1,57 @@
+# --- Node.js dependencies ---
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# --- Logs & debugging files ---
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+error.log
+debug.log
+
+# --- Runtime data ---
+pids/
+*.pid
+*.pid.lock
+
+# --- Coverage & test outputs ---
+coverage/
+.nyc_output/
+
+# --- Compiled output (if using TypeScript or Babel) ---
+dist/
+build/
+
+.env
+
+# --- IDEs & editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS-specific files ---
+.DS_Store
+Thumbs.db
+
+# --- Dependency managers ---
+bower_components/
+jspm_packages/
+
+# --- Misc ---
+.cache/
+*.tgz
+*.bak
+*.orig
+*.log.[0-9]*
+
+# --- PM2 process manager (if used) ---
+.pids/
+.pm2/
+
+# --- Docker ---
+docker-compose.override.yml
