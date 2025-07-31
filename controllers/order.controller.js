@@ -1,208 +1,246 @@
-import Stripe from "../config/stripe.js";
+import { vnpConfig } from "../config/vnpay.config.js";
 import CartProductModel from "../models/cartproduct.model.js";
 import OrderModel from "../models/order.model.js";
 import UserModel from "../models/user.model.js";
+import ProductModel from "../models/product.model.js"; 
 import mongoose from "mongoose";
+import qs from "qs";
+import crypto from "crypto";
+import moment from "moment"; 
 
- export async function CashOnDeliveryOrderController(request,response){
+export async function CashOnDeliveryOrderController(request, response) {
     try {
         const userId = request.userId // auth middleware 
-        const { list_items, totalAmt, addressId,subTotalAmt } = request.body 
+        const { list_items, totalAmt, addressId, subTotalAmt } = request.body 
 
         const payload = list_items.map(el => {
-            return({
-                userId : userId,
-                orderId : `ORD-${new mongoose.Types.ObjectId()}`,
-                productId : el.productId._id, 
-                product_details : {
-                    name : el.productId.name,
-                    image : el.productId.image
+            return ({
+                userId: userId,
+                orderId: `ORD-${new mongoose.Types.ObjectId()}`,
+                productId: el.productId._id, 
+                product_details: {
+                    name: el.productId.name,
+                    image: el.productId.image
                 } ,
-                paymentId : "",
-                payment_status : "CASH ON DELIVERY",
-                delivery_address : addressId ,
-                subTotalAmt  : subTotalAmt,
-                totalAmt  :  totalAmt,
+                paymentId: "",
+                payment_status: "CASH ON DELIVERY",
+                delivery_address: addressId ,
+                subTotalAmt: subTotalAmt,
+                totalAmt: totalAmt,
             })
         })
 
         const generatedOrder = await OrderModel.insertMany(payload)
 
         ///remove from the cart
-        const removeCartItems = await CartProductModel.deleteMany({ userId : userId })
-        const updateInUser = await UserModel.updateOne({ _id : userId }, { shopping_cart : []})
+        const removeCartItems = await CartProductModel.deleteMany({ userId: userId })
+        const updateInUser = await UserModel.updateOne({ _id: userId }, { shopping_cart: [] })
 
         return response.json({
-            message : "Order successfully",
-            error : false,
-            success : true,
-            data : generatedOrder
+            message: "Order successfully",
+            error: false,
+            success: true,
+            data: generatedOrder
         })
 
     } catch (error) {
         return response.status(500).json({
-            message : error.message || error ,
-            error : true,
-            success : false
+            message: error.message || error ,
+            error: true,
+            success: false
         })
     }
 }
 
-export const pricewithDiscount = (price,dis = 1)=>{
+export const pricewithDiscount = (price, dis = 1) => {
     const discountAmout = Math.ceil((Number(price) * Number(dis)) / 100)
     const actualPrice = Number(price) - Number(discountAmout)
     return actualPrice
 }
 
-export async function paymentController(request,response){
+export async function vnpayPaymentController(request, response) {
     try {
-        const userId = request.userId // auth middleware 
-        const { list_items, totalAmt, addressId,subTotalAmt } = request.body 
+        process.env.TZ = 'Asia/Ho_Chi_Minh';
 
-        const user = await UserModel.findById(userId)
+        const userId = request.userId;
+        const { totalAmt, addressId, bankCode, language } = request.body;
 
-        const line_items  = list_items.map(item =>{
-            return{
-               price_data : {
-                    currency : 'inr',
-                    product_data : {
-                        name : item.productId.name,
-                        images : item.productId.image,
-                        metadata : {
-                            productId : item.productId._id
-                        }
-                    },
-                    unit_amount : pricewithDiscount(item.productId.price,item.productId.discount) * 100   
-               },
-               adjustable_quantity : {
-                    enabled : true,
-                    minimum : 1
-               },
-               quantity : item.quantity 
-            }
-        })
+        let date = new Date();
+        let createDate = moment(date).format('YYYYMMDDHHmmss');
+        let orderId = moment(date).format('DDHHmmss');
+        let amount = totalAmt * 100;
 
-        const params = {
-            submit_type : 'pay',
-            mode : 'payment',
-            payment_method_types : ['card'],
-            customer_email : user.email,
-            metadata : {
-                userId : userId,
-                addressId : addressId
-            },
-            line_items : line_items,
-            success_url : `${process.env.FRONTEND_URL}/success`,
-            cancel_url : `${process.env.FRONTEND_URL}/cancel`
+        let ipAddr = request.headers['x-forwarded-for'] ||
+            request.connection.remoteAddress ||
+            request.socket?.remoteAddress ||
+            request.connection?.socket?.remoteAddress;
+
+        const tmnCode = vnpConfig.vnp_TmnCode;
+        console.log("tmnCode", tmnCode);
+        const secretKey = vnpConfig.vnp_HashSecret;
+        console.log("secretKey", secretKey);
+        const vnpUrl = vnpConfig.vnp_Url;
+        console.log("vnpUrl", vnpUrl);
+        const returnUrl = vnpConfig.vnp_ReturnUrl;
+        console.log("returnUrl", returnUrl);
+
+        let locale = language;
+        if (!locale) {
+            locale = 'vn';
+        }
+        let currCode = 'VND';
+
+        let vnp_Params = {
+            'vnp_Version': '2.1.0',
+            'vnp_Command': 'pay',
+            'vnp_TmnCode': tmnCode,
+            'vnp_Locale': locale,
+            'vnp_CurrCode': currCode,
+            'vnp_TxnRef': orderId,
+            'vnp_OrderInfo': 'Thanh toan cho ma GD:' + orderId,
+            'vnp_OrderType': 'other',
+            'vnp_Amount': amount,
+            'vnp_ReturnUrl': returnUrl,
+            'vnp_IpAddr': ipAddr,
+            'vnp_CreateDate': createDate,
+        };
+
+        if (bankCode) {
+            vnp_Params['vnp_BankCode'] = bankCode;
         }
 
-        const session = await Stripe.checkout.sessions.create(params)
+        vnp_Params = sortObject(vnp_Params);
 
-        return response.status(200).json(session)
+        const signData = qs.stringify(vnp_Params, { encode: false });
+        const hmac = crypto.createHmac("sha512", secretKey);
+        const signed = hmac.update(Buffer.from(signData, 'utf-8')).digest("hex");
+        vnp_Params['vnp_SecureHash'] = signed;
 
+        const paymentUrl = `${vnpUrl}?${qs.stringify(vnp_Params, { encode: false })}`;
+
+        return response.json({
+            paymentUrl,
+            success: true,
+            error: false,
+        });
     } catch (error) {
         return response.status(500).json({
-            message : error.message || error,
-            error : true,
-            success : false
-        })
+            message: error.message || error,
+            error: true,
+            success: false
+        });
     }
 }
 
+// Hàm sắp xếp object theo key
+function sortObject(obj) {
+    const sorted = {};
+    const keys = Object.keys(obj).sort();
+    for (let key of keys) {
+        sorted[key] = obj[key];
+    }
+    return sorted;
+}
 
-const getOrderProductItems = async({
+
+const getOrderProductItems = async ({
     lineItems,
     userId,
     addressId,
     paymentId,
     payment_status,
- })=>{
-    const productList = []
+}) => {
+    const productList = [];
 
-    if(lineItems?.data?.length){
-        for(const item of lineItems.data){
-            const product = await Stripe.products.retrieve(item.price.product)
+    if (lineItems?.length) {
+        for (const item of lineItems) {
+            // Giả sử item.productId là _id của sản phẩm trong DB
+            const product = await ProductModel.findById(item.productId);
 
-            const paylod = {
-                userId : userId,
-                orderId : `ORD-${new mongoose.Types.ObjectId()}`,
-                productId : product.metadata.productId, 
-                product_details : {
-                    name : product.name,
-                    image : product.images
-                } ,
-                paymentId : paymentId,
-                payment_status : payment_status,
-                delivery_address : addressId,
-                subTotalAmt  : Number(item.amount_total / 100),
-                totalAmt  :  Number(item.amount_total / 100),
-            }
+            const payload = {
+                userId: userId,
+                orderId: `ORD-${new mongoose.Types.ObjectId()}`,
+                productId: product._id,
+                product_details: {
+                    name: product.name,
+                    image: product.image,
+                },
+                paymentId: paymentId,
+                payment_status: payment_status,
+                delivery_address: addressId,
+                subTotalAmt: Number(item.subTotalAmt),
+                totalAmt: Number(item.totalAmt),
+            };
 
-            productList.push(paylod)
+            productList.push(payload);
         }
     }
 
-    return productList
+    return productList;
 }
 
 //http://localhost:8080/api/order/webhook
-export async function webhookStripe(request,response){
-    const event = request.body;
-    const endPointSecret = process.env.STRIPE_ENPOINT_WEBHOOK_SECRET_KEY
+export async function webhookVnpay(request, response) {
+    try {
+        const vnp_Params = request.query; 
+        const secretKey = vnpConfig.vnp_HashSecret;
 
-    console.log("event",event)
+        // Lấy và loại bỏ vnp_SecureHash để xác thực
+        const secureHash = vnp_Params['vnp_SecureHash'];
+        delete vnp_Params['vnp_SecureHash'];
+        delete vnp_Params['vnp_SecureHashType'];
 
-    // Handle the event
-  switch (event.type) {
-    case 'checkout.session.completed':
-      const session = event.data.object;
-      const lineItems = await Stripe.checkout.sessions.listLineItems(session.id)
-      const userId = session.metadata.userId
-      const orderProduct = await getOrderProductItems(
-        {
-            lineItems : lineItems,
-            userId : userId,
-            addressId : session.metadata.addressId,
-            paymentId  : session.payment_intent,
-            payment_status : session.payment_status,
-        })
-    
-      const order = await OrderModel.insertMany(orderProduct)
+        // Sắp xếp tham số và tạo chuỗi hash
+        const sortedParams = sortObject(vnp_Params);
+        const signData = qs.stringify(sortedParams, { encode: false });
+        const hmac = crypto.createHmac("sha512", secretKey);
+        const signed = hmac.update(signData).digest("hex");
 
-        console.log(order)
-        if(Boolean(order[0])){
-            const removeCartItems = await  UserModel.findByIdAndUpdate(userId,{
-                shopping_cart : []
-            })
-            const removeCartProductDB = await CartProductModel.deleteMany({ userId : userId})
+        if (secureHash === signed) {
+            // Xác thực thành công
+            const orderId = vnp_Params['vnp_TxnRef'];
+            const paymentStatus = vnp_Params['vnp_TransactionStatus'] === '00' ? 'PAID' : 'FAILED';
+
+            // Tìm và cập nhật đơn hàng
+            const order = await OrderModel.findOneAndUpdate(
+                { orderId: orderId },
+                { payment_status: paymentStatus, paymentId: vnp_Params['vnp_TransactionNo'] }
+            );
+
+            if (order && paymentStatus === 'PAID') {
+                // Xóa giỏ hàng nếu thanh toán thành công
+                await UserModel.findByIdAndUpdate(order.userId, { shopping_cart: [] });
+                await CartProductModel.deleteMany({ userId: order.userId });
+            }
+
+            return response.json({ code: '00', message: 'success' });
+        } else {
+            // Xác thực thất bại
+            return response.status(400).json({ code: '97', message: 'Invalid signature' });
         }
-      break;
-    default:
-      console.log(`Unhandled event type ${event.type}`);
-  }
-
-  // Return a response to acknowledge receipt of the event
-  response.json({received: true});
+    } catch (error) {
+        return response.status(500).json({ code: '99', message: error.message || error });
+    }
 }
 
 
-export async function getOrderDetailsController(request,response){
+export async function getOrderDetailsController(request, response) {
     try {
         const userId = request.userId // order id
 
-        const orderlist = await OrderModel.find({ userId : userId }).sort({ createdAt : -1 }).populate('delivery_address')
+        const orderlist = await OrderModel.find({ userId: userId }).sort({ createdAt: -1 }).populate('delivery_address')
 
         return response.json({
-            message : "order list",
-            data : orderlist,
-            error : false,
-            success : true
+            message: "order list",
+            data: orderlist,
+            error: false,
+            success: true
         })
     } catch (error) {
         return response.status(500).json({
-            message : error.message || error,
-            error : true,
-            success : false
+            message: error.message || error,
+            error: true,
+            success: false
         })
     }
 }
